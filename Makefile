@@ -15,6 +15,12 @@ test_matrix: tests/test_matrix.cpp $(SRC_DIR)/matrix.cpp include/matrix.hpp
 run_matrix: test_matrix
 	./test_matrix
 
+benchmark_omp: tests/benchmark_omp.cpp $(SRC_DIR)/matrix.cpp include/matrix.hpp
+	$(CXX) $(CXXFLAGS) $(OPENMP_FLAGS) $(INCLUDE) -o benchmark_omp tests/benchmark_omp.cpp $(SRC_DIR)/matrix.cpp
+
+run_benchmark: benchmark_omp
+	./benchmark_omp
+
 # --- Part 3: Distributed Matrix (MPI) ---
 test_distributed: tests/test_distributed.cpp $(SRC_DIR)/distributed_matrix.cpp $(SRC_DIR)/matrix.cpp include/distributed_matrix.hpp include/matrix.hpp
 	$(MPICXX) $(CXXFLAGS) $(INCLUDE) -o test_distributed tests/test_distributed.cpp $(SRC_DIR)/distributed_matrix.cpp $(SRC_DIR)/matrix.cpp
@@ -30,9 +36,9 @@ run_opencl: test_opencl
 	./test_opencl
 
 # --- Utilities ---
-all: test_matrix test_distributed test_opencl
+all: test_matrix test_distributed test_opencl benchmark_omp
 
 clean:
-	rm -f test_matrix test_distributed test_opencl
+	rm -f test_matrix test_distributed test_opencl benchmark_omp
 
-.PHONY: all clean run_matrix run_distributed run_opencl
+.PHONY: all clean run_matrix run_distributed run_opencl run_benchmark
