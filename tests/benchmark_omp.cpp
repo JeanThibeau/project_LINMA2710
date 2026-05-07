@@ -27,7 +27,7 @@ int main()
     std::cout << std::endl;
 
     // Test parameters
-    std::vector<int> sizes = {8, 16, 32, 64, 128, 256, 512, 1024};
+    std::vector<int> sizes = {32, 64, 128, 256, 512, 1024};
     std::vector<int> threads = {1, 2, 4, 8};
 
     // Get max available threads
