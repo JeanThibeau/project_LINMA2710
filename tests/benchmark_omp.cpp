@@ -57,18 +57,21 @@ int main()
     std::cout << std::endl;
 
     // Benchmark: vary matrix size and thread count
-    std::cout << std::setw(10) << "Size" << std::setw(10) << "Threads";
+    std::cout << std::setw(10) << "Size";
     for (int t : actual_threads)
     {
-        std::cout << std::setw(12) << "T=" + std::to_string(t) + "(ms)";
+        std::cout << std::setw(12) << ("T=" + std::to_string(t) + " ms");
+        std::cout << std::setw(12) << ("T=" + std::to_string(t) + " spd");
     }
-    std::cout << std::setw(12) << "Speedup" << std::endl;
-    std::cout << std::string(10 + 10 + 12 * (actual_threads.size() + 1), '-') << std::endl;
+    std::cout << std::endl;
+
+    std::cout << std::string(10 + 24 * actual_threads.size(), '-') << std::endl;
 
     // For each matrix size
     for (int size : sizes)
     {
         std::vector<double> times;
+        std::vector<double> speedups;
 
         // For each thread count
         for (int num_threads : actual_threads)
@@ -94,16 +97,19 @@ int main()
             times.push_back(time_ms);
         }
 
-        // Print results
-        std::cout << std::setw(10) << size << std::setw(10) << "-";
-        for (int i = 0; i < times.size(); ++i)
+        const double baseline_time = times.front();
+        for (double time_ms : times)
         {
-            std::cout << std::setw(12) << std::fixed << std::setprecision(2) << times[i];
+            speedups.push_back(baseline_time / time_ms);
         }
 
-        // Calculate speedup (relative to single-threaded)
-        double speedup = times[0] / times[actual_threads.size() - 1];
-        std::cout << std::setw(12) << std::fixed << std::setprecision(2) << speedup << "x";
+        // Print results
+        std::cout << std::setw(10) << size;
+        for (std::size_t i = 0; i < times.size(); ++i)
+        {
+            std::cout << std::setw(12) << std::fixed << std::setprecision(2) << times[i];
+            std::cout << std::setw(12) << std::fixed << std::setprecision(2) << speedups[i] << "x";
+        }
         std::cout << std::endl;
     }
 
@@ -123,7 +129,7 @@ int main()
 
     double baseline_time = 0.0;
 
-    for (int i = 0; i < actual_threads.size(); ++i)
+    for (std::size_t i = 0; i < actual_threads.size(); ++i)
     {
         int num_threads = actual_threads[i];
         omp_set_num_threads(num_threads);
