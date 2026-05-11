@@ -257,9 +257,14 @@ Matrix DistributedMatrix::multiplyTransposed(const DistributedMatrix& other) con
         throw std::invalid_argument("DistributedMatrix partitioning must match for multiplyTransposed");
     }
 
+    // Local partial result: each rank computes its contribution
     Matrix localPartial(globalRows, other.globalRows);
     localPartial.fill(0.0);
 
+    double t_start = 0.0, t_comp_end = 0.0, t_comm_end = 0.0;
+    t_start = MPI_Wtime();
+
+    // Local computation
     for (int i = 0; i < globalRows; ++i)
     {
         for (int j = 0; j < other.globalRows; ++j)
@@ -273,6 +278,9 @@ Matrix DistributedMatrix::multiplyTransposed(const DistributedMatrix& other) con
         }
     }
 
+    t_comp_end = MPI_Wtime();
+
+    // Prepare send buffer and run the collective reduction; include packing in comm time
     const int resultSize = globalRows * other.globalRows;
     std::vector<double> sendbuf(resultSize, 0.0);
     std::vector<double> recvbuf(resultSize, 0.0);
@@ -285,6 +293,7 @@ Matrix DistributedMatrix::multiplyTransposed(const DistributedMatrix& other) con
         }
     }
 
+    double comm_start = MPI_Wtime();
     MPI_Allreduce(
         sendbuf.data(),
         recvbuf.data(),
@@ -292,6 +301,7 @@ Matrix DistributedMatrix::multiplyTransposed(const DistributedMatrix& other) con
         MPI_DOUBLE,
         MPI_SUM,
         MPI_COMM_WORLD);
+    t_comm_end = MPI_Wtime();
 
     Matrix result(globalRows, other.globalRows);
     for (int i = 0; i < globalRows; ++i)
@@ -300,6 +310,48 @@ Matrix DistributedMatrix::multiplyTransposed(const DistributedMatrix& other) con
         {
             result.set(i, j, recvbuf[i * other.globalRows + j]);
         }
+    }
+
+    double t_end = MPI_Wtime();
+
+    // Compute timings (seconds)
+    double t_comp = t_comp_end - t_start;
+    double t_comm = t_comm_end - comm_start;
+    double t_total = t_end - t_start;
+
+    // Aggregate timings across ranks: report max and average
+    double max_comp = 0.0, max_comm = 0.0, max_total = 0.0;
+    double sum_comp = 0.0, sum_comm = 0.0, sum_total = 0.0;
+
+    MPI_Reduce(&t_comp, &max_comp, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&t_comm, &max_comm, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&t_total, &max_total, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&t_comp, &sum_comp, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&t_comm, &sum_comm, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&t_total, &sum_total, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank == 0)
+    {
+        int world_size = 1;
+        MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+        double avg_comp = sum_comp / world_size;
+        double avg_comm = sum_comm / world_size;
+        double avg_total = sum_total / world_size;
+
+        // Report sizes and timings (seconds)
+        const long long bytes = static_cast<long long>(resultSize) * static_cast<long long>(sizeof(double));
+        std::cout << "[multiplyTransposed] globalRows=" << globalRows
+                  << " otherRows=" << other.globalRows
+                  << " resultSize=" << resultSize
+                  << " bytes(reduced)=" << bytes << std::endl;
+        std::cout << "  comp (s): max=" << max_comp << " avg=" << avg_comp << std::endl;
+        std::cout << "  comm (s): max=" << max_comm << " avg=" << avg_comm << std::endl;
+        std::cout << "  total (s): max=" << max_total << " avg=" << avg_total << std::endl;
+        double comm_frac = (avg_comm) / (avg_total > 0 ? avg_total : 1.0);
+        std::cout << "  comm fraction (avg)=" << comm_frac << "\n" << std::flush;
     }
 
     return result;

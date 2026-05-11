@@ -1,0 +1,450 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{Madrid}
+\usecolortheme{seagull}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\title{LINMA2710 Project 2026}
+\subtitle{Matrix Operations: Sequential, OpenMP, MPI, OpenCL}
+\author{Your Name}
+\institute{UCLouvain}
+\date{May 2026}
+
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single
+}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{Project Goal and Structure}
+\textbf{Goal:} implement the same matrix API in 4 computing paradigms.
+
+\vspace{0.3cm}
+\begin{tabular}{@{}p{2.7cm}p{5.1cm}p{4.2cm}@{}}
+\toprule
+Class & Data location & Compute model \\
+\midrule
+\texttt{Matrix} & CPU, contiguous \texttt{std::vector<double>} & Sequential loops + OpenMP pragmas \\
+\texttt{DistributedMatrix} & Columns split across MPI ranks & Local compute + collective comms \\
+\texttt{MatrixCL} & OpenCL device buffer (GPU/CPU device) & Kernels launched with NDRange \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.35cm}
+\textbf{Main challenge:} keep one logical API while changing where data lives and how operations are executed.
+\end{frame}
+
+\begin{frame}{Part 1: Matrix Implementation (CPU)}
+\textbf{What was implemented in \texttt{src/matrix.cpp}:}
+\begin{itemize}
+  \item Constructors, copy, assignment, bounds-checked \texttt{get/set}
+  \item \texttt{fill}, \texttt{+}, \texttt{-}, scalar product, matrix product, \texttt{transpose}
+  \item \texttt{apply(func)} and in-place \texttt{sub\_mul(scalar, other)}
+  \item Dimension checks with exceptions for invalid operations
+\end{itemize}
+
+\textbf{Data layout:} row-major contiguous storage
+\[
+\texttt{data}[i,j] = \texttt{data}[i \cdot \texttt{cols} + j]
+\]
+
+\textbf{Complexity:}
+\begin{itemize}
+  \item Add/sub/scalar/apply/sub\_mul: $O(nm)$
+  \item Transpose: $O(nm)$
+  \item Matrix multiplication: $O(nmk)$
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Part 1 Questions: Technical Answers}
+\textbf{Copy constructor behavior}
+\begin{itemize}
+  \item Copy constructor copies \texttt{rows}, \texttt{cols}, and \texttt{std::vector<double> data}
+  \item This is a deep copy: modifying the copy does \textbf{not} modify the original
+\end{itemize}
+
+\textbf{Why no explicit destructor?}
+\begin{itemize}
+  \item Rule of zero / RAII: \texttt{std::vector} frees memory automatically
+  \item No raw \texttt{new/delete}, so compiler-generated destructor is correct
+\end{itemize}
+
+\textbf{Sparse matrix handling}
+\begin{itemize}
+  \item Current design is dense (good for dense workloads)
+  \item For sparse: use CSR/CSC storage + sparse kernels (SpMV/SpMM)
+  \item Benefit: memory and compute proportional to nnz instead of $n \times m$
+\end{itemize}
+
+\textbf{SIMD speedup}
+\begin{itemize}
+  \item Possible via compiler auto-vectorization or explicit AVX intrinsics
+  \item Typical gain on dense loops: around $1.5\times$ to $4\times$ depending on memory bandwidth and loop structure
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Part 2: OpenMP Parallelization Strategy}
+\textbf{Implementation choices (same \texttt{src/matrix.cpp}):}
+\begin{itemize}
+  \item OpenMP enabled with \texttt{-fopenmp}
+  \item Parallel loops added to:\
+  \texttt{fill, +, -, *, transpose, apply, sub\_mul}
+  \item Matrix multiplication uses \texttt{\#pragma omp parallel for collapse(2)} on $(i,j)$ loops
+\end{itemize}
+
+\textbf{Why this works well:}
+\begin{itemize}
+  \item Each thread computes independent output elements
+  \item No race condition on output matrix entries
+  \item Good load balance for medium/large matrices
+\end{itemize}
+
+\textbf{Amdahl law reminder:}
+\[
+S(p)=\frac{1}{(1-f)+\frac{f}{p}}
+\]
+where $f$ is parallel fraction and $p$ is number of threads.
+\end{frame}
+
+\begin{frame}{Part 2 Results: Your OpenMP Benchmark}
+\scriptsize
+\begin{tabular}{rcccc}
+\toprule
+Size & $T_1$ (ms) & $T_2$ speedup & $T_4$ speedup & $T_8$ speedup \\
+\midrule
+32   & 0.04    & 2.11x & 1.57x & 1.75x \\
+64   & 0.27    & 2.05x & 3.48x & 3.57x \\
+128  & 2.39    & 1.86x & 3.35x & 4.12x \\
+256  & 51.52   & 1.99x & 3.94x & 7.64x \\
+512  & 575.22  & 2.01x & 4.01x & 5.79x \\
+1024 & 9735.27 & 1.99x & 3.99x & 7.99x \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.2cm}
+\textbf{Key observations:}
+\begin{itemize}
+  \item Near-ideal scaling for large matrices (1024: almost $8\times$ with 8 threads)
+  \item 512 case: efficiency drops at 8 threads (measured $72.7\%$)
+  \item Small sizes are overhead-dominated (thread startup, scheduling, sync)
+\end{itemize}
+
+\textbf{Potential fixes for small sizes:}
+\begin{itemize}
+  \item Size threshold before parallel region
+  \item Tune scheduling/chunk size
+  \item Blocked multiplication for better cache reuse
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Part 3: DistributedMatrix (MPI) Implementation}
+\textbf{Partitioning strategy:}
+\begin{itemize}
+  \item Global matrix split by columns as evenly as possible
+  \item Rank $r$ stores local block: columns $[\texttt{startCol},\,\texttt{startCol}+\texttt{localCols})$
+\end{itemize}
+
+\textbf{Implemented operations:}
+\begin{itemize}
+  \item Local-only: \texttt{fill}, \texttt{+}, \texttt{-}, scalar, \texttt{apply}, \texttt{sub\_mul}
+  \item Communication-based: \texttt{gather}, \texttt{sum}, \texttt{multiplyTransposed}, \texttt{sync\_matrix}
+\end{itemize}
+
+\textbf{multiplyTransposed pattern:}
+\begin{enumerate}
+  \item Each rank computes local partial matrix product
+  \item \texttt{MPI\_Allreduce} with sum to combine partials
+\end{enumerate}
+
+\textbf{Performance model:}
+\[
+T \approx T_{comp} + T_{comm}
+\quad\text{with}\quad
+T_{comp}\sim O\!\left(\frac{n^3}{p}\right),
+\;T_{comm}\sim O(n^2\log p)
+\]
+\end{frame}
+
+\begin{frame}{Part 3: Communication Profiling and Analysis}
+\textbf{Profiling approach used and recommended:}
+\begin{itemize}
+  \item Measure local computation time per rank for local partial product using high-resolution timers (e.g., std::chrono).
+  \item Measure MPI collectives separately: time the \texttt{MPI\_Allreduce} and \texttt{MPI\_Allgatherv} calls using MPI_Wtime.
+  \item Report fraction: $\alpha = T_{comm}/(T_{comm}+T_{comp})$.
+\end{itemize}
+
+\textbf{Typical results and interpretation:}
+\begin{itemize}
+  \item For large matrices, $T_{comp}\gg T_{comm}$ so communication overhead is small and speedup approaches ideal.
+  \item For moderate sizes or large process counts, communication becomes significant and limits scaling.
+  \item Allreduce of an $n\times n$ partial requires sending $O(n^2)$ doubles; cost grows with data size and log(p) factors for algorithms.
+\end{itemize}
+
+\textbf{Practical microbenchmark recipe:}
+\begin{enumerate}
+  \item Fix matrix sizes, vary number of processes $p$.
+  \item Time: local partial compute, allreduce, and total end-to-end.
+  \item Plot compute vs comm time versus $p$ to identify communication-dominated regime.
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{Part 3: Expected Speedup and Measured Comparison}
+\textbf{Model:} with $p$ processes, if local work scales as $1/p$ and communication is $T_{comm}$, total time:
+\[
+T(p)=\frac{T_{serial}\cdot f}{p} + T_{serial}\cdot(1-f) + T_{comm}(p)
+\]
+where $f$ is parallel fraction of compute.
+
+\textbf{Expected speedup:}
+\begin{itemize}
+  \item Upper bound near $p$ when $T_{comm}\approx 0$ and $f\approx 1$.
+  \item More realistic: diminishing returns as $p$ increases — communication and latency limit gains.
+\end{itemize}
+
+\textbf{How to compare with measurements:}
+\begin{itemize}
+  \item Compute measured speedup $S(p)=T(1)/T(p)$.
+  \item If $S(p) \ll p$, investigate: increased $T_{comm}$, load imbalance, or memory contention.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Part 3: Partitioning vs Gradient-Sync Approach}
+\textbf{Current column-split approach (this project):}
+\begin{itemize}
+  \item Each process stores a contiguous block of columns; local ops operate without communication.
+  \item Collective operations (gather, allreduce) needed for global results.
+\end{itemize}
+
+\textbf{Gradient-sync (data-parallel) style:}
+\begin{itemize}
+  \item Each process holds a full model shard or local data; computations are local; gradients aggregated occasionally.
+  \item Common in ML: frequent synchronization of smallish gradients or periodic allreduce.
+\end{itemize}
+
+\textbf{Trade-offs:}
+\begin{itemize}
+  \item Column-split: less frequent communication for local elementwise ops, but expensive all-to-all style collective for some linear algebra.
+  \item Gradient-sync: lower-latency frequent gradients if they fit network characteristics; can use compression or quantization.
+  \item Choice depends on operation sparsity, data size, and communication fabric.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Part 3 Questions: Analysis and Comparison}
+\textbf{Communication vs computation overhead}
+\begin{itemize}
+  \item For large matrices, local FLOPs dominate and scaling improves
+  \item For smaller matrices or larger $p$, \texttt{MPI\_Allreduce/Allgatherv} dominates runtime
+\end{itemize}
+
+\textbf{Expected speedup}
+\begin{itemize}
+  \item Ideal upper bound: close to $p$ when communication is negligible
+  \item Real speedup limited by network latency/bandwidth and collective costs
+\end{itemize}
+
+\textbf{Compared to gradient-synchronization style partitioning}
+\begin{itemize}
+  \item Current project split: model/data already partitioned by columns for matrix algebra
+  \item Gradient-sync approach (typical in distributed ML): local forward/backward + periodic global sync
+  \item Trade-off: gradient sync has fewer but often larger synchronization phases; this project uses collectives tightly coupled to algebraic operations
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Part 4: MatrixCL (OpenCL) Implementation}
+\textbf{What was implemented in \texttt{src/matrix\_opencl.cpp}:}
+\begin{itemize}
+  \item Device-side storage with \texttt{cl::Buffer}
+  \item Kernel cache with one-time compilation (fill/add/sub\_mul/transpose/matmul)
+  \item Host wrappers for API-equivalent operations and copy-back to host
+  \item Queue created with \texttt{CL\_QUEUE\_PROFILING\_ENABLE}
+\end{itemize}
+
+\textbf{Simple matrix multiplication kernel used:}
+\begin{itemize}
+  \item One work-item computes one output $C(i,j)$
+  \item Inner loop over shared dimension $k$
+  \item Correct and readable baseline kernel
+\end{itemize}
+
+\textbf{Second, faster version to present (recommended):}
+\begin{itemize}
+  \item Tiled kernel with local memory (blocked multiplication)
+  \item Reduces global memory traffic, improves arithmetic intensity
+  \item Best for large matrices and GPUs with enough local memory
+\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Part 4: Two Kernel Versions — Naive and Tiled}
+\textbf{Version 1: naive kernel (already in source)}
+\begin{lstlisting}[language=C]
+__kernel void matrix_mul(__global const float* A,
+                         __global const float* B,
+                         __global float* C,
+                         int A_rows, int A_cols, int B_cols) {
+    int i = get_global_id(0);
+    int j = get_global_id(1);
+    if (i < A_rows && j < B_cols) {
+        float sum = 0.0f;
+        for (int k = 0; k < A_cols; ++k) {
+            sum += A[i * A_cols + k] * B[k * B_cols + j];
+        }
+        C[i * B_cols + j] = sum;
+    }
+}
+\end{lstlisting}
+
+\textbf{Version 2: tiled (uses local memory) — example tile size 16}
+\begin{lstlisting}[language=C]
+#define TS 16
+__kernel void matmul_tiled(__global const float* A,
+                           __global const float* B,
+                           __global float* C,
+                           int A_rows, int A_cols, int B_cols) {
+    int row = get_global_id(0);
+    int col = get_global_id(1);
+
+    __local float As[TS][TS];
+    __local float Bs[TS][TS];
+
+    float acc = 0.0f;
+    for (int t = 0; t < (A_cols + TS-1)/TS; ++t) {
+        int aRow = row;
+        int aCol = t*TS + get_local_id(1);
+        int bRow = t*TS + get_local_id(0);
+        int bCol = col;
+
+        // Load tiles with bounds checks
+        As[get_local_id(0)][get_local_id(1)] = (aRow < A_rows && aCol < A_cols) ? A[aRow*A_cols + aCol] : 0.0f;
+        Bs[get_local_id(0)][get_local_id(1)] = (bRow < A_cols && bCol < B_cols) ? B[bRow*B_cols + bCol] : 0.0f;
+
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        for (int k = 0; k < TS; ++k) {
+            acc += As[get_local_id(0)][k] * Bs[k][get_local_id(1)];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (row < A_rows && col < B_cols)
+        C[row*B_cols + col] = acc;
+}
+\end{lstlisting}
+
+\textbf{Why tiled is faster:}
+\begin{itemize}
+  \item Reuses loaded tiles from fast local memory; reduces global memory traffic
+  \item Higher arithmetic intensity per memory load
+  \item Tile size tuned to device local memory and register pressure
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Part 4: Profiling and Energy Measurement Plan}
+\textbf{Profiling steps:}
+\begin{enumerate}
+  \item Enable profiling on the command queue (already set in tests): \texttt{CL\_QUEUE\_PROFILING\_ENABLE}
+  \item Enqueue kernel, obtain \texttt{cl::Event}, then use \texttt{getProfilingInfo<CL_PROFILING_COMMAND_START/END>()}
+  \item Report host-to-device, kernel, device-to-host times separately
+\end{enumerate}
+
+\textbf{Energy measurement:}
+\begin{itemize}
+  \item Use vendor tools (NVIDIA: \texttt{nvidia-smi --query-gpu=power.draw --format=csv}) or CodeCarbon to sample power during runs
+  \item Compute energy-to-solution: integrate power over kernel runtime (Joules)
+\end{itemize}
+
+\textbf{Evaluation matrix:}
+\begin{itemize}
+  \item Vary problem size, compare naive vs tiled runtimes and energy
+  \item Report speedup and energy reduction (if any)
+\end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Part 4: Two Kernel Versions (for Presentation)}
+\textbf{Version 1: naive (implemented)}
+\begin{lstlisting}[language=C]
+__kernel void matrix_mul(__global const float* A,
+                         __global const float* B,
+                         __global float* C,
+                         int A_rows, int A_cols, int B_cols) {
+  int i = get_global_id(0);
+  int j = get_global_id(1);
+  if (i < A_rows && j < B_cols) {
+    float sum = 0.0f;
+    for (int k = 0; k < A_cols; ++k)
+      sum += A[i * A_cols + k] * B[k * B_cols + j];
+    C[i * B_cols + j] = sum;
+  }
+}
+\end{lstlisting}
+
+\textbf{Version 2: optimized (to discuss)}: tiled local-memory kernel (e.g., tile size 16 or 32), fewer global loads, better throughput.
+\end{frame}
+
+\begin{frame}{Part 4 Questions: Profiling and Energy}
+\textbf{Profiling approach:}
+\begin{itemize}
+  \item Use event profiling timestamps from OpenCL queue
+  \item Compare kernel execution time naive vs tiled
+  \item Also measure end-to-end time (host-device transfers included)
+\end{itemize}
+
+\textbf{Expected behavior:}
+\begin{itemize}
+  \item Naive kernel: memory bandwidth bottleneck
+  \item Tiled kernel: higher occupancy/reuse, lower time for large matrices
+\end{itemize}
+
+\textbf{Power/energy measurement plan:}
+\begin{itemize}
+  \item Run fixed-size workloads repeatedly
+  \item Log GPU power using CodeCarbon or vendor tools
+  \item Report energy-to-solution (Joules) and not only runtime
+\end{itemize}
+\end{frame}
+
+\begin{frame}{5-Minute Talk Plan}
+\textbf{Suggested timing:}
+\begin{itemize}
+  \item 0:00--0:30: Context and architecture
+  \item 0:30--1:30: Part 1 design decisions + question answers
+  \item 1:30--2:30: OpenMP method + your benchmark highlights
+  \item 2:30--3:30: MPI decomposition + communication/computation trade-off
+  \item 3:30--4:30: OpenCL design + two-kernel story + profiling strategy
+  \item 4:30--5:00: Conclusion and future optimization steps
+\end{itemize}
+
+\textbf{Strong conclusion message:}
+\begin{itemize}
+  \item Same matrix API, 4 execution models
+  \item Parallelization gives major speedups for large workloads
+  \item Real performance depends on memory hierarchy and communication costs
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Backup Slide: Extra Questions You Can Answer}
+\begin{itemize}
+  \item Why use column partitioning in MPI and not row partitioning?
+  \item How would blocked CPU multiplication improve cache behavior?
+  \item What numerical precision issues can appear (float vs double)?
+  \item How to decide between OpenMP, MPI, and OpenCL for a given workload?
+  \item What is the impact of PCIe transfer overhead on GPU speedup?
+\end{itemize}
+\end{frame}
+
+\end{document}

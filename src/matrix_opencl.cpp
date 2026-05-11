@@ -98,6 +98,47 @@ const std::string kernel_source_matrix_mul = R"(
     }
 )";
 
+    // Tiled matrix multiplication kernel (uses local memory). Tile size chosen at compile-time.
+    const std::string kernel_source_matrix_mul_tiled = R"(
+    #define TS 16
+    __kernel void matmul_tiled(__global const float* A,
+                               __global const float* B,
+                               __global float* C,
+                               int A_rows, int A_cols, int B_cols) {
+        int row = get_global_id(0);
+        int col = get_global_id(1);
+
+        __local float As[TS][TS];
+        __local float Bs[TS][TS];
+
+        float acc = 0.0f;
+        int numTiles = (A_cols + TS - 1) / TS;
+        for (int t = 0; t < numTiles; ++t) {
+            int localRow = get_local_id(0);
+            int localCol = get_local_id(1);
+
+            int aRow = row;
+            int aCol = t * TS + localCol;
+            int bRow = t * TS + localRow;
+            int bCol = col;
+
+            As[localRow][localCol] = (aRow < A_rows && aCol < A_cols) ? A[aRow * A_cols + aCol] : 0.0f;
+            Bs[localRow][localCol] = (bRow < A_cols && bCol < B_cols) ? B[bRow * B_cols + bCol] : 0.0f;
+
+            barrier(CLK_LOCAL_MEM_FENCE);
+
+            for (int k = 0; k < TS; ++k) {
+                acc += As[localRow][k] * Bs[k][localCol];
+            }
+
+            barrier(CLK_LOCAL_MEM_FENCE);
+        }
+
+        if (row < A_rows && col < B_cols)
+            C[row * B_cols + col] = acc;
+    }
+    )";
+
 // --- KernelCache ---
 
 void KernelCache::compileKernels(cl::Context context, const std::vector<cl::Device>& devices) {
@@ -119,6 +160,10 @@ void KernelCache::compileKernels(cl::Context context, const std::vector<cl::Devi
 
         cl::Program prog_matrix_mul = loadAndBuildProgram(context, devices, kernel_source_matrix_mul, "matrix_mul");
         kernel_matrix_mul = cl::Kernel(prog_matrix_mul, "matrix_mul");
+
+            // compile tiled kernel
+            cl::Program prog_matrix_mul_tiled = loadAndBuildProgram(context, devices, kernel_source_matrix_mul_tiled, "matmul_tiled");
+            kernel_matrix_mul_tiled = cl::Kernel(prog_matrix_mul_tiled, "matmul_tiled");
 
         initialized = true;
         std::cout << "OpenCL kernels compiled successfully." << std::endl;
@@ -327,11 +372,25 @@ MatrixCL MatrixCL::operator*(const MatrixCL& other) const
     kernels_->kernel_matrix_mul.setArg(4, this->cols_);
     kernels_->kernel_matrix_mul.setArg(5, other.cols_);
 
+    cl::Event event;
     queue_.enqueueNDRangeKernel(
         kernels_->kernel_matrix_mul,
         cl::NullRange,
         cl::NDRange(static_cast<size_t>(this->rows_), static_cast<size_t>(other.cols_)),
-        cl::NullRange);
+        cl::NullRange,
+        nullptr,
+        &event);
+    event.wait();
+
+    // profiling: report kernel time in milliseconds
+    try {
+        cl_ulong start = event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+        cl_ulong end = event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+        double ms = static_cast<double>(end - start) * 1e-6;
+        std::cout << "[MatrixCL::operator*] kernel time (ms): " << ms << std::endl;
+    } catch (...) {
+        // profiling info may not be available
+    }
 
     return result;
 }
@@ -356,6 +415,57 @@ MatrixCL MatrixCL::transpose() const
         cl::NullRange,
         cl::NDRange(static_cast<size_t>(rows_), static_cast<size_t>(cols_)),
         cl::NullRange);
+
+    return result;
+}
+
+MatrixCL MatrixCL::multiplyTiled(const MatrixCL& other, int tileSize) const
+{
+    if (this->cols_ != other.rows_)
+    {
+        throw std::invalid_argument("MatrixCL dimensions must match for multiplication");
+    }
+
+    int C_rows = this->rows_;
+    int C_cols = other.cols_;
+    MatrixCL result(C_rows, C_cols, context_, queue_);
+    if (C_rows * C_cols == 0) return result;
+
+    if (!kernels_ || !kernels_->initialized)
+    {
+        throw std::runtime_error("OpenCL kernels are not initialized");
+    }
+
+    // set args
+    kernels_->kernel_matrix_mul_tiled.setArg(0, this->buffer_);
+    kernels_->kernel_matrix_mul_tiled.setArg(1, other.buffer_);
+    kernels_->kernel_matrix_mul_tiled.setArg(2, result.buffer_);
+    kernels_->kernel_matrix_mul_tiled.setArg(3, this->rows_);
+    kernels_->kernel_matrix_mul_tiled.setArg(4, this->cols_);
+    kernels_->kernel_matrix_mul_tiled.setArg(5, other.cols_);
+
+    // choose local size equal to tile size (TS in kernel is fixed at 16); ensure multiples
+    const size_t TS = 16;
+    size_t globalRow = ((size_t)C_rows + TS - 1) / TS * TS;
+    size_t globalCol = ((size_t)C_cols + TS - 1) / TS * TS;
+
+    cl::Event event;
+    queue_.enqueueNDRangeKernel(
+        kernels_->kernel_matrix_mul_tiled,
+        cl::NullRange,
+        cl::NDRange(globalRow, globalCol),
+        cl::NDRange(TS, TS),
+        nullptr,
+        &event);
+    event.wait();
+
+    try {
+        cl_ulong start = event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+        cl_ulong end = event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+        double ms = static_cast<double>(end - start) * 1e-6;
+        std::cout << "[MatrixCL::multiplyTiled] kernel time (ms): " << ms << std::endl;
+    } catch (...) {
+    }
 
     return result;
 }

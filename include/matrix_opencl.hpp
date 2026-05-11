@@ -19,6 +19,7 @@ struct KernelCache {
     cl::Kernel kernel_sub_mul;
     cl::Kernel kernel_transpose;
     cl::Kernel kernel_matrix_mul;
+    cl::Kernel kernel_matrix_mul_tiled;
 
     bool initialized = false;
 
@@ -61,6 +62,9 @@ public:
     MatrixCL operator-(const MatrixCL& other) const;
     MatrixCL operator*(const MatrixCL& other) const; // Matrix multiplication
     MatrixCL operator*(float scalar) const;           // Scalar multiplication
+
+    // Faster tiled multiplication using local memory (tile size fixed at compile-time in kernel)
+    MatrixCL multiplyTiled(const MatrixCL& other, int tileSize = 16) const;
 
     MatrixCL transpose() const;
 
