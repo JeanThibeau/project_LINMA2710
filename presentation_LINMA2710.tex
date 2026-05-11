@@ -182,26 +182,22 @@ T_{comp}\sim O\!\left(\frac{n^3}{p}\right),
 \end{frame}
 
 \begin{frame}{Part 3: Communication Profiling and Analysis}
-\textbf{Profiling approach used and recommended:}
+\textbf{What we measured:}
 \begin{itemize}
-  \item Measure local computation time per rank for local partial product using high-resolution timers (e.g., std::chrono).
-  \item Measure MPI collectives separately: time the \texttt{MPI\_Allreduce} and \texttt{MPI\_Allgatherv} calls using MPI_Wtime.
-  \item Report fraction: $\alpha = T_{comm}/(T_{comm}+T_{comp})$.
+  \item Local compute time: the triple loop that forms the partial product.
+  \item Communication time: the \texttt{MPI\_Allreduce} that sums partial results.
+  \item Reported fraction: $\alpha = T_{comm}/(T_{comm}+T_{comp})$.
 \end{itemize}
 
-\textbf{Typical results and interpretation:}
+\textbf{Observed behavior:}
 \begin{itemize}
-  \item For large matrices, $T_{comp}\gg T_{comm}$ so communication overhead is small and speedup approaches ideal.
-  \item For moderate sizes or large process counts, communication becomes significant and limits scaling.
-  \item Allreduce of an $n\times n$ partial requires sending $O(n^2)$ doubles; cost grows with data size and log(p) factors for algorithms.
+  \item For small matrices, communication becomes visible once the number of ranks grows.
+  \item For large matrices, local computation dominates and the reduction cost is amortized.
+  \item Example: for $512\times512$ on 8 ranks, the average communication fraction was about 15\% to 23\%.
 \end{itemize}
 
-\textbf{Practical microbenchmark recipe:}
-\begin{enumerate}
-  \item Fix matrix sizes, vary number of processes $p$.
-  \item Time: local partial compute, allreduce, and total end-to-end.
-  \item Plot compute vs comm time versus $p$ to identify communication-dominated regime.
-\end{enumerate}
+\textbf{Interpretation:}
+The algorithm scales well when the matrix is large enough, but MPI collectives dominate for small matrices or many ranks.
 \end{frame}
 
 \begin{frame}{Part 3: Expected Speedup and Measured Comparison}
@@ -217,11 +213,22 @@ where $f$ is parallel fraction of compute.
   \item More realistic: diminishing returns as $p$ increases — communication and latency limit gains.
 \end{itemize}
 
-\textbf{How to compare with measurements:}
-\begin{itemize}
-  \item Compute measured speedup $S(p)=T(1)/T(p)$.
-  \item If $S(p) \ll p$, investigate: increased $T_{comm}$, load imbalance, or memory contention.
-\end{itemize}
+\textbf{Measured total times and speedups:}
+\scriptsize
+\begin{tabular}{rcccc}
+\toprule
+Size & $T_1$ (ms) & $S(2)$ & $S(4)$ & $S(8)$ \\
+\midrule
+64  & 1.129 & 1.69x & 3.73x & 4.24x \\
+128 & 8.883 & 1.85x & 4.30x & 5.91x \\
+256 & 69.729 & 1.88x & 4.67x & 6.77x \\
+512 & 553.988 & 2.45x & 4.81x & 7.40x \\
+\bottomrule
+\end{tabular}
+
+\vspace{0.15cm}
+\normalsize
+\textbf{Conclusion:} the measured speedup gets closer to ideal as the matrix size increases. The best result is about $7.4\times$ on 8 ranks for $512\times512$.
 \end{frame}
 
 \begin{frame}{Part 3: Partitioning vs Gradient-Sync Approach}
@@ -248,21 +255,21 @@ where $f$ is parallel fraction of compute.
 \begin{frame}{Part 3 Questions: Analysis and Comparison}
 \textbf{Communication vs computation overhead}
 \begin{itemize}
-  \item For large matrices, local FLOPs dominate and scaling improves
-  \item For smaller matrices or larger $p$, \texttt{MPI\_Allreduce/Allgatherv} dominates runtime
+  \item For small matrices or many ranks, MPI collectives dominate the runtime.
+  \item For large matrices, the local multiply dominates and the collective cost is amortized.
 \end{itemize}
 
 \textbf{Expected speedup}
 \begin{itemize}
-  \item Ideal upper bound: close to $p$ when communication is negligible
-  \item Real speedup limited by network latency/bandwidth and collective costs
+  \item Ideal upper bound is close to $p$.
+  \item In practice, your measured speedup reaches about $7.4\times$ on 8 ranks for $512\times512$.
 \end{itemize}
 
 \textbf{Compared to gradient-synchronization style partitioning}
 \begin{itemize}
   \item Current project split: model/data already partitioned by columns for matrix algebra
   \item Gradient-sync approach (typical in distributed ML): local forward/backward + periodic global sync
-  \item Trade-off: gradient sync has fewer but often larger synchronization phases; this project uses collectives tightly coupled to algebraic operations
+  \item Trade-off: column splitting is natural for matrix operations, while gradient sync is better when repeated local updates can hide communication.
 \end{itemize}
 \end{frame}
 
