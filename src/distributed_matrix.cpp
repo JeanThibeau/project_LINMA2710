@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 // The matrix is split by columns across MPI processes.
 // Each process stores a local Matrix with a subset of columns.
