@@ -41,10 +41,16 @@ test_opencl: tests/test_opencl.cpp $(SRC_DIR)/matrix_opencl.cpp include/matrix_o
 run_opencl: test_opencl
 	./test_opencl
 
+benchmark_opencl: tests/benchmark_opencl.cpp $(SRC_DIR)/matrix_opencl.cpp include/matrix_opencl.hpp
+	$(CXX) $(CXXFLAGS) $(INCLUDE) -o benchmark_opencl tests/benchmark_opencl.cpp $(SRC_DIR)/matrix_opencl.cpp -lOpenCL
+
+run_benchmark_opencl: benchmark_opencl
+	./benchmark_opencl
+
 # --- Utilities ---
-all: test_matrix test_distributed test_opencl benchmark_omp benchmark_distributed
+all: test_matrix test_distributed test_opencl benchmark_omp benchmark_distributed benchmark_opencl
 
 clean:
-	rm -f test_matrix test_distributed test_opencl benchmark_omp
+	rm -f test_matrix test_distributed test_opencl benchmark_omp benchmark_distributed benchmark_opencl
 
-.PHONY: all clean run_matrix run_distributed run_opencl run_benchmark run_benchmark_distributed
+.PHONY: all clean run_matrix run_distributed run_opencl run_benchmark run_benchmark_distributed run_benchmark_opencl
